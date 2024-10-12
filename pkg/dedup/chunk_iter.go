@@ -162,10 +162,12 @@ type overlappingMerger struct {
 func newOverlappingMerger() *overlappingMerger {
 	return &overlappingMerger{
 		samplesMergeFunc: func(a, b chunkenc.Iterator) chunkenc.Iterator {
-			return newDedupSeriesIterator(
+			it := newDedupSeriesIterator(
 				noopAdjustableSeriesIterator{a},
 				noopAdjustableSeriesIterator{b},
 			)
+
+			return newCachingDedupSeriesIterator(it, 100_000)
 		},
 	}
 }

@@ -4,6 +4,7 @@
 package dedup
 
 import (
+	"fmt"
 	"math"
 
 	"github.com/prometheus/prometheus/model/histogram"
@@ -204,6 +205,10 @@ func (s *dedupSeries) Iterator(_ chunkenc.Iterator) chunkenc.Iterator {
 			replicaIter = noopAdjustableSeriesIterator{Iterator: o.Iterator(nil)}
 		}
 		it = newDedupSeriesIterator(it, replicaIter)
+	}
+
+	if iter, ok := it.(*dedupSeriesIterator); ok {
+		it = newCachingDedupSeriesIterator(iter, 100_000)
 	}
 
 	return it
@@ -434,6 +439,72 @@ func (it *dedupSeriesIterator) Err() error {
 		return it.a.Err()
 	}
 	return it.b.Err()
+}
+
+type cachingDedupSeriesIterator struct {
+	*dedupSeriesIterator
+	cache     []cacheItem
+	cacheSize int
+	cacheHits int
+}
+
+type cacheItem struct {
+	ts      int64
+	val     float64
+	valType chunkenc.ValueType
+}
+
+func newCachingDedupSeriesIterator(it *dedupSeriesIterator, cacheSize int) *cachingDedupSeriesIterator {
+	return &cachingDedupSeriesIterator{
+		dedupSeriesIterator: it,
+		cache:               make([]cacheItem, 0, cacheSize),
+		cacheSize:           cacheSize,
+		cacheHits:           -1,
+	}
+}
+
+func (it *cachingDedupSeriesIterator) Next() chunkenc.ValueType {
+	if it.cacheHits+1 < len(it.cache) {
+		it.cacheHits++
+		return it.cache[it.cacheHits].valType
+	}
+
+	// If not, call the underlying Next and update cache
+	valType := it.dedupSeriesIterator.Next()
+	if valType != chunkenc.ValNone {
+		it.updateCache()
+	}
+	return valType
+}
+
+func (it *cachingDedupSeriesIterator) updateCache() {
+	fmt.Println("update cache")
+	t, v := it.dedupSeriesIterator.At()
+	entry := cacheItem{ts: t, val: v, valType: it.dedupSeriesIterator.aval}
+
+	if len(it.cache) < it.cacheSize {
+		it.cache = append(it.cache, entry)
+	} else {
+		copy(it.cache, it.cache[1:])
+		it.cache[len(it.cache)-1] = entry
+	}
+	it.cacheHits = len(it.cache) - 1
+}
+
+func (it *cachingDedupSeriesIterator) Seek(t int64) chunkenc.ValueType {
+	for i, item := range it.cache {
+		if item.ts >= t {
+			it.cacheHits = i
+			return item.valType
+		}
+	}
+
+	valType := it.dedupSeriesIterator.Seek(t)
+	it.cache = it.cache[:0]
+	if valType != chunkenc.ValNone {
+		it.updateCache()
+	}
+	return valType
 }
 
 // boundedSeriesIterator wraps a series iterator and ensures that it only emits
